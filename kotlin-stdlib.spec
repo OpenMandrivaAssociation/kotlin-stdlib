@@ -18,8 +18,9 @@ URL:		https://github.com/JetBrains/kotlin
 # singletonList, and singletonMap.
 # -Xoutput-builtins-metadata arrived in Kotlin 2.1.20, so this compiler
 # does not write .kotlin_builtins. Those seven resources are copied from
-# the installed kotlin-stdlib 2.0.21 jar. kotlin-reflect loads kotlin.Any
-# from them.
+# kotlin-libs 2.0.21 (/usr/share/java/kotlin-stdlib.jar). The kotlin
+# package ships kotlinc and does not ship that jar. kotlin-reflect loads
+# kotlin.Any from those resources.
 # The jar is installed under a versioned file name. kotlin-libs 2.0.21 keeps
 # /usr/share/java/kotlin-stdlib.jar and its sysjar index.
 Source0:	kotlin-stdlib-%{version}.tar.gz
@@ -31,6 +32,7 @@ Source4:	FixMapMethods.java
 BuildArch:	noarch
 BuildRequires:	java-21-openjdk-devel
 BuildRequires:	kotlin = 2.0.21
+BuildRequires:	kotlin-libs = 2.0.21
 BuildRequires:	sysjar
 BuildRequires:	javapackages-filesystem
 BuildRequires:	mvn(org.jetbrains:annotations)
@@ -58,8 +60,7 @@ set -eo pipefail
 export JAVA_HOME=%{_jvmdir}/java-21-openjdk
 export PATH="$JAVA_HOME/bin:/usr/bin:/bin"
 export TMPDIR=%{_tmppath}
-cp -f %{_sourcedir}/stdlib-build.py %{_sourcedir}/PatchOverride.java \
-	%{_sourcedir}/StdlibDiag.java %{_sourcedir}/FixMapMethods.java .
+cp -f %{SOURCE1} %{SOURCE2} %{SOURCE3} %{SOURCE4} .
 python3 stdlib-build.py \
 	--source . \
 	--java-home "$JAVA_HOME" \

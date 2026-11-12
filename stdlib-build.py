@@ -43,6 +43,32 @@ SKIP_REL = {
     "kotlin/contextParameters/ContextOf.kt",
 }
 
+# kotlinc 2.0.21 ignores -Xoutput-builtins-metadata. kotlin-reflect loads
+# kotlin.Any from these resources. They live in kotlin-libs, not in the
+# kotlin compiler package.
+INSTALLED_STDLIB = Path("/usr/share/java/kotlin-stdlib.jar")
+BUILTIN_NAMES = (
+    "kotlin/annotation/annotation.kotlin_builtins",
+    "kotlin/collections/collections.kotlin_builtins",
+    "kotlin/coroutines/coroutines.kotlin_builtins",
+    "kotlin/internal/internal.kotlin_builtins",
+    "kotlin/kotlin.kotlin_builtins",
+    "kotlin/ranges/ranges.kotlin_builtins",
+    "kotlin/reflect/reflect.kotlin_builtins",
+)
+
+
+def require_installed_builtins(path=INSTALLED_STDLIB):
+    path = Path(path)
+    if not path.is_file():
+        raise SystemExit(f"{path} is missing; install kotlin-libs 2.0.21")
+    with zipfile.ZipFile(path) as jar:
+        sizes = {item.filename: item.file_size for item in jar.infolist()}
+    for name in BUILTIN_NAMES:
+        if sizes.get(name, 0) <= 0:
+            raise SystemExit(f"{path} does not contain {name}")
+    return path
+
 
 def run(cmd, log_path, env):
     print("RUN", cmd[0], "...", flush=True)
@@ -284,6 +310,7 @@ def main():
     javac = java_home / "bin" / "javac"
     if not java.is_file() or not javac.is_file():
         raise SystemExit(f"JDK 21 tools not found under {java_home}")
+    require_installed_builtins()
     env = os.environ.copy()
     env["JAVA_HOME"] = str(java_home)
     env["PATH"] = str(java_home / "bin") + ":/usr/bin:/bin"
@@ -596,22 +623,10 @@ def main():
     if "setOf:([Ljava/lang/Object;)Ljava/util/Set;" in arrays_javap:
         raise SystemExit("ArraysKt still calls vararg setOf")
 
-    # kotlinc 2.0.21 warns and ignores -Xoutput-builtins-metadata. The
-    # installed stdlib jar is the source of the seven metadata resources
-    # kotlin-reflect uses to resolve kotlin.Any.
-    installed = Path("/usr/share/java/kotlin-stdlib.jar")
-    builtin_names = (
-        "kotlin/annotation/annotation.kotlin_builtins",
-        "kotlin/collections/collections.kotlin_builtins",
-        "kotlin/coroutines/coroutines.kotlin_builtins",
-        "kotlin/internal/internal.kotlin_builtins",
-        "kotlin/kotlin.kotlin_builtins",
-        "kotlin/ranges/ranges.kotlin_builtins",
-        "kotlin/reflect/reflect.kotlin_builtins",
-    )
+    installed = require_installed_builtins()
     with zipfile.ZipFile(installed) as installed_jar:
         present = set(installed_jar.namelist())
-        for name in builtin_names:
+        for name in BUILTIN_NAMES:
             dest = classes / name
             if dest.is_file() and dest.stat().st_size > 0:
                 continue
