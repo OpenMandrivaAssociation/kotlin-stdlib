@@ -1,6 +1,6 @@
 Name:		kotlin-stdlib
 Version:	2.4.21
-Release:	1
+Release:	2
 Summary:	Kotlin standard library for the JVM
 Group:		Development/Java
 License:	Apache-2.0
@@ -12,6 +12,14 @@ URL:		https://github.com/JetBrains/kotlin
 # and ContextOf.kt are left out. Square-bracket destructuring and
 # @IgnorableReturnValue are rewritten in the staged tree. TypesJVM
 # destructuring and discarded underscore bindings are shadowed.
+# kotlinc 2.0.21 resolves setOf(x), listOf(x), and mapOf(x) to the
+# varargs overloads in this fragment compile. One-element toSet() and
+# toMap() then recurse. Those call sites go through singletonSet,
+# singletonList, and singletonMap.
+# -Xoutput-builtins-metadata arrived in Kotlin 2.1.20, so this compiler
+# does not write .kotlin_builtins. Those seven resources are copied from
+# the installed kotlin-stdlib 2.0.21 jar. kotlin-reflect loads kotlin.Any
+# from them.
 # The jar is installed under a versioned file name. kotlin-libs 2.0.21 keeps
 # /usr/share/java/kotlin-stdlib.jar and its sysjar index.
 Source0:	kotlin-stdlib-%{version}.tar.gz
@@ -129,6 +137,9 @@ mkdir -p check
 cat > check/LibCall.kt << 'EOF'
 import kotlin.collections.listOf
 import kotlin.collections.mapOf
+import kotlin.collections.toList
+import kotlin.collections.toMap
+import kotlin.collections.toSet
 import kotlin.text.removePrefix
 import kotlin.to
 
@@ -136,17 +147,26 @@ fun main() {
     val values = listOf("gradle")
     val stripped = "kotlin-stdlib".removePrefix("kotlin-")
     val one = mapOf("stdlib" to 241)
+    val fromArray = arrayOf("stdlib").toSet()
+    val fromList = arrayOf(241).toList()
+    val fromPairs = arrayOf("stdlib" to 241).toMap()
     if (values.single() != "gradle" || stripped != "stdlib" || one.getValue("stdlib") != 241) {
         throw AssertionError(values.toString())
     }
-    println("stdlib_kt_ok " + stripped + " " + one.getValue("stdlib"))
+    if (fromArray.single() != "stdlib" || fromList.single() != 241 || fromPairs.getValue("stdlib") != 241) {
+        throw AssertionError(fromArray.toString())
+    }
+    if (object {}::class.java.classLoader.getResource("kotlin/kotlin.kotlin_builtins") == null) {
+        throw AssertionError("kotlin_builtins missing")
+    }
+    println("stdlib_kt_ok " + stripped + " " + one.getValue("stdlib") + " toset")
 }
 EOF
 kotlinc -J-Xmx1g -jvm-target 1.8 -language-version 2.0 -no-stdlib -no-reflect \
 	-jdk-home "$JAVA_HOME" -cp "$JAR" -d check/out check/LibCall.kt
 java -cp "check/out:$JAR" LibCallKt > check/out.txt
 cat check/out.txt
-grep -F -qx 'stdlib_kt_ok stdlib 241' check/out.txt
+grep -F -qx 'stdlib_kt_ok stdlib 241 toset' check/out.txt
 
 %files -f .mfiles
 %license license/LICENSE.txt

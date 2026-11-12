@@ -128,6 +128,109 @@ def rewrite_parsed_syntax(source):
             path.write_text(text)
             changed += 1
     print(f"rewrote {changed} sources in place", flush=True)
+    rewrite_singleton_calls(source)
+
+
+# kotlinc 2.0.21, in this fragment compile, resolves setOf(x) / listOf(x) /
+# mapOf(x) to the varargs overload. setOf(vararg) calls toSet(), whose
+# one-element branch calls setOf again, so Array.toSet() never returns.
+# mapOf(vararg) does the same through toMap(). A distinct expect/actual
+# name is not part of that overload set.
+SINGLETON_ANCHORS = (
+    (
+        "src/kotlin/collections/Sets.kt",
+        "public expect fun <T> setOf(element: T): Set<T>\n",
+        "public expect fun <T> setOf(element: T): Set<T>\n"
+        "internal expect fun <T> singletonSet(element: T): Set<T>\n",
+    ),
+    (
+        "src/kotlin/collections/Collections.kt",
+        "public expect fun <T> listOf(element: T): List<T>\n",
+        "public expect fun <T> listOf(element: T): List<T>\n"
+        "internal expect fun <T> singletonList(element: T): List<T>\n",
+    ),
+    (
+        "src/kotlin/collections/Maps.kt",
+        "public expect fun <K, V> mapOf(pair: Pair<K, V>): Map<K, V>\n",
+        "public expect fun <K, V> mapOf(pair: Pair<K, V>): Map<K, V>\n"
+        "internal expect fun <K, V> singletonMap(pair: Pair<K, V>): Map<K, V>\n",
+    ),
+    (
+        "jvm/src/kotlin/collections/SetsJVM.kt",
+        "public actual fun <T> setOf(element: T): Set<T> = java.util.Collections.singleton(element)\n",
+        "public actual fun <T> setOf(element: T): Set<T> = java.util.Collections.singleton(element)\n"
+        "internal actual fun <T> singletonSet(element: T): Set<T> = java.util.Collections.singleton(element)\n",
+    ),
+    (
+        "jvm/src/kotlin/collections/CollectionsJVM.kt",
+        "public actual fun <T> listOf(element: T): List<T> = java.util.Collections.singletonList(element)\n",
+        "public actual fun <T> listOf(element: T): List<T> = java.util.Collections.singletonList(element)\n"
+        "internal actual fun <T> singletonList(element: T): List<T> = java.util.Collections.singletonList(element)\n",
+    ),
+    (
+        "jvm/src/kotlin/collections/MapsJVM.kt",
+        "public actual fun <K, V> mapOf(pair: Pair<K, V>): Map<K, V> = java.util.Collections.singletonMap(pair.first, pair.second)\n",
+        "public actual fun <K, V> mapOf(pair: Pair<K, V>): Map<K, V> = java.util.Collections.singletonMap(pair.first, pair.second)\n"
+        "internal actual fun <K, V> singletonMap(pair: Pair<K, V>): Map<K, V> = java.util.Collections.singletonMap(pair.first, pair.second)\n",
+    ),
+)
+
+SINGLETON_CALLS = (
+    (
+        "setOf(if (this is List) this[0] else iterator().next())",
+        "singletonSet(if (this is List) this[0] else iterator().next())",
+    ),
+    ("setOf(iterator().next())", "singletonSet(iterator().next())"),
+    ("setOf(this[0])", "singletonSet(this[0])"),
+    (
+        "listOf(if (this is List) get(0) else iterator().next())",
+        "singletonList(if (this is List) get(0) else iterator().next())",
+    ),
+    ("listOf(this[0])", "singletonList(this[0])"),
+    (
+        "mapOf(if (this is List) this[0] else iterator().next())",
+        "singletonMap(if (this is List) this[0] else iterator().next())",
+    ),
+    ("mapOf(this[0])", "singletonMap(this[0])"),
+)
+
+
+def rewrite_singleton_calls(source):
+    for relative, old, new in SINGLETON_ANCHORS:
+        path = source / relative
+        text = path.read_text()
+        count = text.count(old)
+        if count != 1:
+            raise SystemExit(f"{relative} anchor count {count}")
+        path.write_text(text.replace(old, new, 1))
+    replaced = 0
+    for path in source.rglob("*.kt"):
+        text = path.read_text()
+        original = text
+        for old, new in SINGLETON_CALLS:
+            text = text.replace(old, new)
+        # Array.takeWhile is a public inline function. listOf(vararg) does not
+        # recurse, so this one site stays on listOf. An internal callee is
+        # illegal inside a public inline function.
+        text = text.replace(
+            "else if (i == 1) singletonList(this[0])",
+            "else if (i == 1) listOf(this[0])",
+        )
+        if text != original:
+            path.write_text(text)
+            replaced += 1
+    leftovers = []
+    for path in source.rglob("*.kt"):
+        for line in path.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("1 -> setOf(") or stripped.startswith("1 -> listOf(") or stripped.startswith("1 -> mapOf("):
+                leftovers.append(f"{path}: {stripped}")
+    if leftovers:
+        raise SystemExit("ambiguous singleton calls remain:\n" + "\n".join(leftovers))
+    for path in source.rglob("*.kt"):
+        if "else if (i == 1) singletonList(this[0])" in path.read_text():
+            raise SystemExit(f"inline singletonList remains in {path}")
+    print(f"singleton calls rewritten in {replaced} files", flush=True)
 
 
 def adapt(path, source_root, shadow, types_path):
@@ -426,10 +529,42 @@ def main():
         "        if (values.size() != 1 || !\"gradle\".equals(values.get(0))) {\n"
         "            throw new AssertionError(values);\n"
         "        }\n"
+        "        java.util.Set<String> fromArray = kotlin.collections.ArraysKt.toSet(new String[]{\"stdlib\"});\n"
+        "        java.util.Set<Integer> fromInts = kotlin.collections.ArraysKt.toSet(new int[]{241});\n"
+        "        java.util.List<Integer> fromList = kotlin.collections.ArraysKt.toList(new int[]{241});\n"
+        "        @SuppressWarnings(\"unchecked\")\n"
+        "        kotlin.Pair<String, Integer>[] pairs = (kotlin.Pair<String, Integer>[]) new kotlin.Pair[]{\n"
+        "            kotlin.TuplesKt.to(\"stdlib\", Integer.valueOf(241))\n"
+        "        };\n"
+        "        java.util.Map<String, Integer> fromPairs = kotlin.collections.MapsKt.toMap(pairs);\n"
+        "        java.util.Set<String> two = kotlin.collections.ArraysKt.toSet(new String[]{\"stdlib\", \"gradle\"});\n"
+        "        if (values.size() != 1 || !\"gradle\".equals(values.get(0))) {\n"
+        "            throw new AssertionError(values);\n"
+        "        }\n"
         "        if (!\"stdlib\".equals(stripped) || one.size() != 1\n"
         "                || !Integer.valueOf(241).equals(one.get(\"stdlib\"))\n"
         "                || !one.keySet().contains(\"stdlib\")) {\n"
         "            throw new AssertionError(one);\n"
+        "        }\n"
+        "        if (fromArray.size() != 1 || !\"stdlib\".equals(fromArray.iterator().next())\n"
+        "                || !fromArray.getClass().getName().contains(\"Singleton\")) {\n"
+        "            throw new AssertionError(fromArray.getClass().getName() + \" \" + fromArray);\n"
+        "        }\n"
+        "        if (fromInts.size() != 1 || !Integer.valueOf(241).equals(fromInts.iterator().next())\n"
+        "                || !fromInts.getClass().getName().contains(\"Singleton\")) {\n"
+        "            throw new AssertionError(fromInts.getClass().getName());\n"
+        "        }\n"
+        "        if (fromList.size() != 1 || !Integer.valueOf(241).equals(fromList.get(0))\n"
+        "                || !fromList.getClass().getName().contains(\"Singleton\")) {\n"
+        "            throw new AssertionError(fromList.getClass().getName());\n"
+        "        }\n"
+        "        if (fromPairs.size() != 1 || !Integer.valueOf(241).equals(fromPairs.get(\"stdlib\"))\n"
+        "                || !fromPairs.getClass().getName().contains(\"Singleton\")) {\n"
+        "            throw new AssertionError(fromPairs.getClass().getName() + \" \" + fromPairs);\n"
+        "        }\n"
+        "        if (!kotlin.collections.ArraysKt.toSet(new String[0]).isEmpty()\n"
+        "                || two.size() != 2 || !two.contains(\"stdlib\") || !two.contains(\"gradle\")) {\n"
+        "            throw new AssertionError(two);\n"
         "        }\n"
         "        Object impl = Class.forName(\"kotlin.internal.PlatformImplementationsKt\")\n"
         "            .getField(\"IMPLEMENTATIONS\").get(null);\n"
@@ -437,7 +572,7 @@ def main():
         "                \"kotlin.internal.jdk8.JDK8PlatformImplementations\")) {\n"
         "            throw new AssertionError(impl.getClass().getName());\n"
         "        }\n"
-        "        System.out.println(\"stdlib_build_ok \" + stripped + \" \" + one.get(\"stdlib\"));\n"
+        "        System.out.println(\"stdlib_build_ok \" + stripped + \" \" + one.get(\"stdlib\") + \" toset\");\n"
         "    }\n"
         "}\n"
     )
@@ -448,9 +583,43 @@ def main():
     smoke_out = run([
         str(java), "-cp", f"{smoke}:{classes}", "Smoke",
     ], work / "smoke.txt", env)
-    if "stdlib_build_ok stdlib 241" not in smoke_out:
+    if "stdlib_build_ok stdlib 241 toset" not in smoke_out:
         raise SystemExit(smoke_out)
     print(smoke_out.strip(), flush=True)
+    javap = java_home / "bin" / "javap"
+    arrays_javap = run([
+        str(javap), "-c", "-p", "-classpath", str(classes),
+        "kotlin.collections.ArraysKt___ArraysKt",
+    ], work / "javap-arrays.txt", env)
+    if "singletonSet:(Ljava/lang/Object;)Ljava/util/Set;" not in arrays_javap:
+        raise SystemExit("ArraysKt toSet does not call singletonSet")
+    if "setOf:([Ljava/lang/Object;)Ljava/util/Set;" in arrays_javap:
+        raise SystemExit("ArraysKt still calls vararg setOf")
+
+    # kotlinc 2.0.21 warns and ignores -Xoutput-builtins-metadata. The
+    # installed stdlib jar is the source of the seven metadata resources
+    # kotlin-reflect uses to resolve kotlin.Any.
+    installed = Path("/usr/share/java/kotlin-stdlib.jar")
+    builtin_names = (
+        "kotlin/annotation/annotation.kotlin_builtins",
+        "kotlin/collections/collections.kotlin_builtins",
+        "kotlin/coroutines/coroutines.kotlin_builtins",
+        "kotlin/internal/internal.kotlin_builtins",
+        "kotlin/kotlin.kotlin_builtins",
+        "kotlin/ranges/ranges.kotlin_builtins",
+        "kotlin/reflect/reflect.kotlin_builtins",
+    )
+    with zipfile.ZipFile(installed) as installed_jar:
+        present = set(installed_jar.namelist())
+        for name in builtin_names:
+            dest = classes / name
+            if dest.is_file() and dest.stat().st_size > 0:
+                continue
+            if name not in present:
+                raise SystemExit(f"{installed} does not contain {name}")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(installed_jar.read(name))
+    print("copied kotlin_builtins from the installed stdlib", flush=True)
 
     manifest = work / "manifest.mf"
     manifest.write_text("Manifest-Version: 1.0\nAutomatic-Module-Name: kotlin.stdlib\n")
@@ -468,6 +637,9 @@ def main():
         "kotlin/collections/CollectionsKt.class",
         "META-INF/main.kotlin_module",
         "META-INF/stdlibJdk8.kotlin_module",
+        "kotlin/kotlin.kotlin_builtins",
+        "kotlin/collections/collections.kotlin_builtins",
+        "kotlin/reflect/reflect.kotlin_builtins",
     ):
         if required not in names:
             raise SystemExit(f"jar missing {required}")
